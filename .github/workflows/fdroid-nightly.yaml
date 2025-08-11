@@ -80,7 +80,7 @@ jobs:
       - name: Update F-Droid metadata
         run: |
           mkdir -p metadata
-          PACKAGE_NAME="it.vfsfitvnm.vimusic"  # change as needed
+          PACKAGE_NAME="com.yourpackage.app"  # change as needed
           cat > metadata/${PACKAGE_NAME}.yml << EOF
           Categories:
             - Development
