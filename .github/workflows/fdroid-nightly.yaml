@@ -1,0 +1,121 @@
+name: F-Droid Nightly Build
+
+on:
+  schedule:
+    - cron: '0 2 * * *' # daily 2 AM UTC
+  workflow_dispatch:     # manual trigger allowed
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout master branch
+        uses: actions/checkout@v4
+        with:
+          ref: master
+          fetch-depth: 0
+
+      - name: Set up JDK 17
+        uses: actions/setup-java@v4
+        with:
+          java-version: '17'
+          distribution: 'temurin'
+
+      - name: Setup Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: Cache Gradle packages
+        uses: actions/cache@v3
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: ${{ runner.os }}-gradle-${{ hashFiles('**/*.gradle*', '**/gradle-wrapper.properties') }}
+          restore-keys: |
+            ${{ runner.os }}-gradle-
+
+      - name: Generate version info
+        id: version
+        run: |
+          DATE=$(date +%Y%m%d)
+          COMMIT_SHORT=$(git rev-parse --short HEAD)
+          VERSION_NAME="nightly-${DATE}-${COMMIT_SHORT}"
+          VERSION_CODE=$(date +%s)
+          echo "name=$VERSION_NAME" >> $GITHUB_OUTPUT
+          echo "code=$VERSION_CODE" >> $GITHUB_OUTPUT
+
+      - name: Update app version in build.gradle.kts
+        run: |
+          sed -i "s/versionCode = .*/versionCode = ${{ steps.version.outputs.code }}/" app/build.gradle.kts
+          sed -i "s/versionName = .*/versionName = \"${{ steps.version.outputs.name }}\"/" app/build.gradle.kts
+
+      - name: Make gradlew executable
+        run: chmod +x ./gradlew
+
+      - name: Build APK
+        run: ./gradlew assembleRelease --no-daemon --stacktrace
+
+      - name: Sign APK (if keystore available)
+        if: ${{ secrets.KEYSTORE_BASE64 && secrets.KEYSTORE_PASSWORD }}
+        run: |
+          echo "${{ secrets.KEYSTORE_BASE64 }}" | base64 -d > release.keystore
+          $ANDROID_HOME/build-tools/*/apksigner sign \
+            --ks release.keystore \
+            --ks-pass pass:${{ secrets.KEYSTORE_PASSWORD }} \
+            --key-pass pass:${{ secrets.KEY_PASSWORD || secrets.KEYSTORE_PASSWORD }} \
+            --ks-key-alias ${{ secrets.KEY_ALIAS || 'release' }} \
+            app/build/outputs/apk/release/app-release.apk
+
+      - name: Clone fdroid branch
+        run: |
+          git fetch origin fdroid
+          git checkout -b fdroid origin/fdroid
+
+      - name: Copy APK to F-Droid repo
+        run: |
+          mkdir -p repo
+          cp app/build/outputs/apk/release/app-release.apk repo/app-${{ steps.version.outputs.name }}.apk
+
+      - name: Update F-Droid metadata
+        run: |
+          mkdir -p metadata
+          PACKAGE_NAME="it.vfsfitvnm.vimusic"  # change as needed
+          cat > metadata/${PACKAGE_NAME}.yml << EOF
+          Categories:
+            - Development
+          License: GPL-3.0-or-later
+          WebSite: https://github.com/${{ github.repository }}
+          SourceCode: https://github.com/${{ github.repository }}
+          IssueTracker: https://github.com/${{ github.repository }}/issues
+
+          AutoName: Your App Name
+          Description: |
+            Nightly build of Your App Name
+
+            Built from commit: $(git rev-parse HEAD)
+
+          Builds:
+            - versionName: ${{ steps.version.outputs.name }}
+              versionCode: ${{ steps.version.outputs.code }}
+              commit: $(git rev-parse HEAD)
+              gradle:
+                - yes
+          EOF
+
+      - name: Update F-Droid repository
+        run: |
+          fdroid update --verbose
+          fdroid deploy --verbose
+
+      - name: Commit and push changes to fdroid branch
+        run: |
+          git config user.email "action@github.com"
+          git config user.name "GitHub Action"
+          git add repo metadata
+          if git diff --cached --quiet; then
+            echo "No changes to commit"
+          else
+            git commit -m "Nightly build ${{ steps.version.outputs.name }}"
+            git push origin fdroid
+          fi
